@@ -7,6 +7,6 @@
 #define DEVICES 4
 #define MAX_USECOUNT 512
 
-extern struct file* files[MAX_USECOUNT];
+extern struct file *files[DEVICES][MAX_USECOUNT];
 
 #endif

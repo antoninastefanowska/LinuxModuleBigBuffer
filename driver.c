@@ -1,43 +1,45 @@
 #include <stddef.h>
-#include <linux/sched.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
 #include <asm/io.h>
-#include <asm/page.h>
 
 #include "driver.h"
 
 #include "buffer.h"
 
-int usecount = 0;
-int counter = 0;
+int usecount[] = {[0 ... DEVICES - 1] = 0};
 
-struct file* files[MAX_USECOUNT];
-struct wait_queue *queue;
+struct file *files[DEVICES][MAX_USECOUNT];
 
 int buffer_open(struct inode *inode, struct file *file)
 {
     int i, sub_device = MINOR(inode->i_rdev);
-    
+
     if (sub_device >= DEVICES)
     {
         printk(KERN_ERR "Bledny numer urzadzenia.\n");
         return -EINVAL;
     }
 
-    if (usecount == MAX_USECOUNT)
+    if (usecount[sub_device] == MAX_USECOUNT)
     {
         printk(KERN_ERR "Przekroczono liczbe dozwolonych uzyc. Poczekaj na zwolnienie.\n");
         return -EINVAL;
     }
 
-    files[counter++] = file;
+    for (i = 0; i < MAX_USECOUNT; i++)
+    {
+        if (files[sub_device][i] == NULL)
+        {
+            files[sub_device][i] = file;
+            break;
+        }
+    }
 
     MOD_INC_USE_COUNT;
-    usecount++;
+    usecount[sub_device]++;
     return 0;
 }
 
@@ -50,23 +52,24 @@ void buffer_release(struct inode *inode, struct file *file)
         printk(KERN_ERR "Bledny numer urzadzenia.\n");
         return;
     }
-	
+
     for (i = 0; i < MAX_USECOUNT; i++)
     {
-        if (files[i] == file)
-            files[i] = NULL;
+        if (files[sub_device][i] == file)
+        {
+            files[sub_device][i] = NULL;
+            break;
+        }
     }
 
     MOD_DEC_USE_COUNT;
-    usecount--;
-    if (usecount == 0)
-	counter = 0;
+    usecount[sub_device]--;
 }
 
 int buffer_read_mod(struct inode *inode, struct file *file, char *pB, int count)
 {
     char c;
-    int i;
+    int i, result;
     int sub_device = MINOR(inode->i_rdev);
 
     if (sub_device >= DEVICES)
@@ -77,8 +80,8 @@ int buffer_read_mod(struct inode *inode, struct file *file, char *pB, int count)
 
     for (i = 0; i < count; i++)
     {
-        c = buffer_read(file);
-        if (c == (char)NULL)
+        result = buffer_read(sub_device, file, &c);
+        if (result < 0)
             return i;
         put_user(c, pB + i);
     }
@@ -100,13 +103,13 @@ int buffer_write_mod(struct inode *inode, struct file *file, const char *pB, int
     for (i = 0; i < count; i++)
     {
         c = get_user(pB + i);
-        if (buffercount == buffersize)
+        if (buffercount[sub_device] == buffersize[sub_device])
         {
-            result = buffer_change_size(buffersize + count - i);
+            result = buffer_change_size(sub_device, buffersize[sub_device] + count - i);
             if (result < 0)
                 return i;
         }
-        buffer_write(file, c);
+        buffer_write(sub_device, file, c);
     }
 
     return count;
@@ -144,35 +147,40 @@ int buffer_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsig
             }
         }
     }
-    
+
     user_input = get_user((int *)arg);
-    
+
     switch (command_number)
     {
-        case 0:
-            return buffer_change_size(user_input);
+    case 0:
+        return buffer_change_size(sub_device, user_input);
 
-        case 1:
-            put_user(buffersize, (int *)arg);
-            return 0;
-	    
-        case 2:
-            put_user(buffercount, (int *)arg);
-            return 0;
+    case 1:
+        put_user(buffersize[sub_device], (int *)arg);
+        return 0;
 
-        default:
-            printk(KERN_ERR "Niepoprawna komenda.\n");
-            return -EINVAL;
+    case 2:
+        put_user(buffercount[sub_device], (int *)arg);
+        return 0;
+
+    default:
+        printk(KERN_ERR "Niepoprawna komenda.\n");
+        return -EINVAL;
     }
-
     return 0;
 }
 
-int buffer_mmap (struct inode *inode, struct file *file, struct vm_area_struct *vma)
+int buffer_mmap(struct inode *inode, struct file *file, struct vm_area_struct *vma)
 {
-    int i;
-    if (remap_page_range(vma->vm_start, virt_to_phys(buffer), vma->vm_end - vma->vm_start, vma->vm_page_prot))
-	    return -EAGAIN;
+    int sub_device = MINOR(inode->i_rdev);
+    if (sub_device >= DEVICES)
+    {
+        printk(KERN_ERR "Bledny numer urzadzenia.\n");
+        return -EINVAL;
+    }
+
+    if (remap_page_range(vma->vm_start, virt_to_phys(buffer[sub_device]), vma->vm_end - vma->vm_start, vma->vm_page_prot))
+        return -EAGAIN;
 
     vma->vm_inode = inode;
     inode->i_count++;
@@ -192,14 +200,15 @@ int init_module(void)
 {
     int i, result;
     char *buffer_area;
-    result = buffer_create();
-    if (result < 0)
+    for (i = 0; i < DEVICES; i++)
     {
-        printk("NIEPOWODZENIE ALOKACJI BUFORA\n");
-        return result;
+        if (buffer_create(i) < 0)
+        {
+            printk("NIEPOWODZENIE ALOKACJI BUFORA\n");
+            return result;
+        }
     }
 
-    init_waitqueue(&queue);
     result = register_chrdev(BUFFER_MAJOR, "big_buffer", &buffer_ops);
     if (result == 0)
         printk("URZADZENIE OTWARTE\n");
@@ -211,7 +220,8 @@ int init_module(void)
 void cleanup_module(void)
 {
     int i, result = unregister_chrdev(BUFFER_MAJOR, "big_buffer");
-    buffer_free();
+    for (i = 0; i < DEVICES; i++)
+        buffer_free(i);
 
     if (result == 0)
         printk("URZADZENIE ZAMKNIETE\n");
