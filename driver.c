@@ -79,10 +79,7 @@ int buffer_read_mod(struct inode *inode, struct file *file, char *pB, int count)
     {
         c = buffer_read(file);
         if (c == (char)NULL)
-        {
-            interruptible_sleep_on(&queue);
             return i;
-        }
         put_user(c, pB + i);
     }
     return count;
