@@ -4,6 +4,8 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <asm/io.h>
+#include <asm/semaphore.h>
+#include <asm/fcntl.h>
 
 #include "driver.h"
 
@@ -12,6 +14,7 @@
 int usecount[] = {[0 ... DEVICES - 1] = 0};
 
 struct file *files[DEVICES][MAX_USECOUNT];
+struct semaphore write_sem[] = {[0 ... DEVICES - 1] = MUTEX};
 
 int buffer_open(struct inode *inode, struct file *file)
 {
@@ -100,6 +103,10 @@ int buffer_write_mod(struct inode *inode, struct file *file, const char *pB, int
         return -EINVAL;
     }
 
+    down(&write_sem[sub_device]);
+    if (file->f_flags & O_APPEND)
+        file->f_pos = buffercount[sub_device];
+
     for (i = 0; i < count; i++)
     {
         c = get_user(pB + i);
@@ -107,10 +114,14 @@ int buffer_write_mod(struct inode *inode, struct file *file, const char *pB, int
         {
             result = buffer_change_size(sub_device, buffersize[sub_device] + count - i);
             if (result < 0)
+            {
+                up(&write_sem[sub_device]);
                 return i;
+            }
         }
         buffer_write(sub_device, file, c);
     }
+    up(&write_sem[sub_device]);
 
     return count;
 }
